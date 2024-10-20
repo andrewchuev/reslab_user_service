@@ -1,20 +1,25 @@
 mod db;
 mod auth;
 
+use crate::db::{store_token, verify_token, User};
+use auth::{create_jwt, hash_password, verify_password};
+
+
 use axum::{
     extract::{Json, Path},
     http::StatusCode,
     routing::{get, post},
     Router,
 };
+use axum_extra::TypedHeader;
+use db::{create_user, fetch_user_by_id, fetch_user_by_username};
 use dotenv::dotenv;
+use headers::authorization::{Bearer};
+use headers::Authorization;
 use serde::{Deserialize, Serialize};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use tokio::net::TcpListener;
-use tracing::{info, error};
-use db::{create_user, fetch_user_by_id, fetch_user_by_username};
-use auth::{hash_password, verify_password, create_jwt};
-use crate::db::User;
+use tracing::{error, info};
 
 #[derive(Debug, Deserialize)]
 struct RegisterRequest {
@@ -75,6 +80,19 @@ async fn register_user(
 
     match create_user(&pool, &payload.username, &payload.email, &password_hash).await {
         Ok(user_id) => {
+            let token = match create_jwt(user_id) {
+                Ok(token) => token,
+                Err(e) => {
+                    error!("Failed to create token: {}", e);
+                    return StatusCode::INTERNAL_SERVER_ERROR;
+                }
+            };
+
+            if let Err(e) = store_token(&pool, user_id, &token).await {
+                error!("Failed to store token: {}", e);
+                return StatusCode::INTERNAL_SERVER_ERROR;
+            }
+
             info!("User registered with id: {}", user_id);
             StatusCode::CREATED
         }
@@ -84,7 +102,6 @@ async fn register_user(
         }
     }
 }
-
 async fn login_user(
     axum::Extension(pool): axum::Extension<PgPool>,
     Json(payload): Json<LoginRequest>,
@@ -116,7 +133,15 @@ async fn login_user(
 async fn get_user(
     axum::Extension(pool): axum::Extension<PgPool>,
     Path(user_id): Path<i32>,
+    TypedHeader(Authorization(token)): TypedHeader<Authorization<Bearer>>,
 ) -> Result<Json<User>, StatusCode> {
+    println!("token: {}", token.token());
+
+    if let Err(e) = verify_token(&pool, token.token(), user_id).await {
+        error!("Invalid token: {}", e);
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
     let user = match fetch_user_by_id(&pool, user_id).await {
         Ok(user) => user,
         Err(e) => {
@@ -128,8 +153,4 @@ async fn get_user(
     info!("Fetched user: {}", user.username);
     Ok(Json(user))
 }
-
-
-
-
 

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{Execute, PgPool};
 use sqlx::Error;
 use sqlx::Row;
 
@@ -38,4 +38,27 @@ pub async fn fetch_user_by_id(pool: &PgPool, user_id: i32) -> Result<User, Error
         .fetch_one(pool)
         .await?;
     Ok(user)
+}
+
+pub async fn store_token(pool: &PgPool, user_id: i32, token: &str) -> Result<(), Error> {
+    let query = "INSERT INTO tokens (user_id, token) VALUES ($1, $2)";
+    sqlx::query(query)
+        .bind(user_id)
+        .bind(token)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn verify_token(pool: &PgPool, token: &str, user_id: i32) -> Result<(), Error> {
+    let query = sqlx::query("SELECT token FROM tokens WHERE user_id = $1 AND token = $2")
+        .bind(user_id)
+        .bind(token);
+
+    println!("user_id: {}", user_id);
+    println!("token: {}", token);
+    println!("Executing SQL query: {:?}", query.sql());
+
+    let _ = query.fetch_one(pool).await?;
+    Ok(())
 }
