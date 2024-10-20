@@ -1,5 +1,6 @@
-use argon2::password_hash::SaltString;
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+mod db;
+mod auth;
+
 use axum::{
     extract::{Json, Path},
     http::StatusCode,
@@ -7,26 +8,13 @@ use axum::{
     Router,
 };
 use dotenv::dotenv;
-use jsonwebtoken::{encode, EncodingKey, Header};
-use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
-use sqlx::{postgres::PgPoolOptions, PgPool, Row};
+use sqlx::{postgres::PgPoolOptions, PgPool};
 use tokio::net::TcpListener;
 use tracing::{info, error};
-
-#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
-struct User {
-    id: i32,
-    username: String,
-    email: String,
-    password_hash: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Claims {
-    sub: i32,
-    exp: usize,
-}
+use db::{create_user, fetch_user_by_id, fetch_user_by_username};
+use auth::{hash_password, verify_password, create_jwt};
+use crate::db::User;
 
 #[derive(Debug, Deserialize)]
 struct RegisterRequest {
@@ -77,45 +65,31 @@ async fn register_user(
     axum::Extension(pool): axum::Extension<PgPool>,
     Json(payload): Json<RegisterRequest>,
 ) -> StatusCode {
-    let password = payload.password.as_bytes();
-    let salt = SaltString::generate(&mut OsRng);
-    let argon2 = Argon2::default();
-    let password_hash = match argon2.hash_password(password, &salt) {
-        Ok(hash) => hash.to_string(),
+    let password_hash = match hash_password(&payload.password) {
+        Ok(hash) => hash,
         Err(e) => {
             error!("Failed to hash password: {}", e);
             return StatusCode::INTERNAL_SERVER_ERROR;
         }
     };
 
-    let query = "INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id";
-    let user_id: i32 = match sqlx::query(query)
-        .bind(&payload.username)
-        .bind(&payload.email)
-        .bind(&password_hash)
-        .fetch_one(&pool)
-        .await {
-        Ok(row) => row.get(0),
+    match create_user(&pool, &payload.username, &payload.email, &password_hash).await {
+        Ok(user_id) => {
+            info!("User registered with id: {}", user_id);
+            StatusCode::CREATED
+        }
         Err(e) => {
             error!("Failed to insert user: {}", e);
-            return StatusCode::INTERNAL_SERVER_ERROR;
+            StatusCode::INTERNAL_SERVER_ERROR
         }
-    };
-
-    info!("User registered with id: {:?}", user_id);
-    StatusCode::CREATED
+    }
 }
 
 async fn login_user(
     axum::Extension(pool): axum::Extension<PgPool>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, StatusCode> {
-    let query = "SELECT id, username, email, password_hash FROM users WHERE username = $1";
-    let user = match sqlx::query_as::<_, User>(query)
-        .bind(&payload.username)
-        .fetch_one(&pool)
-        .await
-    {
+    let user = match fetch_user_by_username(&pool, &payload.username).await {
         Ok(user) => user,
         Err(e) => {
             error!("Failed to fetch user: {}", e);
@@ -123,20 +97,8 @@ async fn login_user(
         }
     };
 
-    let parsed_hash = match PasswordHash::new(&user.password_hash) {
-        Ok(hash) => hash,
-        Err(e) => {
-            error!("Failed to parse password hash: {}", e);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
-
-    if Argon2::default().verify_password(payload.password.as_bytes(), &parsed_hash).is_ok() {
-        let claims = Claims {
-            sub: user.id,
-            exp: 10000000000,
-        };
-        let token = match encode(&Header::default(), &claims, &EncodingKey::from_secret("your_secret_key".as_ref())) {
+    if verify_password(&payload.password, &user.password_hash).is_ok() {
+        let token = match create_jwt(user.id) {
             Ok(token) => token,
             Err(e) => {
                 error!("Failed to create token: {}", e);
@@ -155,12 +117,7 @@ async fn get_user(
     axum::Extension(pool): axum::Extension<PgPool>,
     Path(user_id): Path<i32>,
 ) -> Result<Json<User>, StatusCode> {
-    let query = "SELECT id, username, email, password_hash FROM users WHERE id = $1";
-    let user = match sqlx::query_as::<_, User>(query)
-        .bind(user_id)
-        .fetch_one(&pool)
-        .await
-    {
+    let user = match fetch_user_by_id(&pool, user_id).await {
         Ok(user) => user,
         Err(e) => {
             error!("Failed to fetch user: {}", e);
@@ -171,3 +128,8 @@ async fn get_user(
     info!("Fetched user: {}", user.username);
     Ok(Json(user))
 }
+
+
+
+
+
