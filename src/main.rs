@@ -203,4 +203,4 @@ async fn update_user(
     Ok(StatusCode::OK)
 }
 
-// Adding the route for the new update user functionality
+
